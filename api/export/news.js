@@ -86,6 +86,7 @@ function inferRegion(category, locationName) {
 }
 
 export default async function handler(req) {
+  // Origin protection (keep as-is)
   if (isDisallowedOrigin(req)) {
     return new Response(JSON.stringify({ error: "Origin not allowed" }), {
       status: 403,
@@ -94,9 +95,13 @@ export default async function handler(req) {
   }
 
   const cors = getCorsHeaders(req, "GET, OPTIONS");
+
+  // Preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: cors });
   }
+
+  // Method guard
   if (req.method !== "GET") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
@@ -104,6 +109,7 @@ export default async function handler(req) {
     });
   }
 
+  // API key validation (repo’s built-in)
   const apiKeyResult = validateApiKey(req);
   if (apiKeyResult.required && !apiKeyResult.valid) {
     return new Response(JSON.stringify({ error: apiKeyResult.error }), {
@@ -112,13 +118,16 @@ export default async function handler(req) {
     });
   }
 
+  // Rate limit (repo’s built-in)
   const rateLimited = await checkRateLimit(req, cors);
   if (rateLimited) return rateLimited;
 
   const url = new URL(req.url);
+
   const variantRaw = url.searchParams.get("variant") || "full";
   const variant = VALID_VARIANTS.has(variantRaw) ? variantRaw : "full";
   const lang = (url.searchParams.get("lang") || "en").trim() || "en";
+
   const limitRaw = parseInt(
     url.searchParams.get("limit") || String(DEFAULT_LIMIT),
     10,
@@ -155,6 +164,7 @@ export default async function handler(req) {
   const regionFilter = new Set(
     parseCsv(url.searchParams.get("region")).map(normalizeText),
   );
+
   const importanceMin = clamp(
     Number(url.searchParams.get("importanceMin") || 0),
     0,
@@ -162,15 +172,28 @@ export default async function handler(req) {
   );
   const alertOnly = toBoolean(url.searchParams.get("alertOnly"));
 
-  const digestPath = `/api/news/v1/list-feed-digest?variant=${encodeURIComponent(variant)}&lang=${encodeURIComponent(lang)}`;
+  const forwardedApiKey =
+    req.headers.get("X-WorldMonitor-Key") ||
+    req.headers.get("x-worldmonitor-key");
+
+  const digestPath = `/api/news/v1/list-feed-digest?variant=${encodeURIComponent(
+    variant,
+  )}&lang=${encodeURIComponent(lang)}`;
   const digestUrl = `${url.origin}${digestPath}`;
 
   let digest;
   try {
+    const headers = new Headers({ Accept: "application/json" });
+
+    if (forwardedApiKey) {
+      headers.set("X-WorldMonitor-Key", forwardedApiKey);
+    }
+
     const resp = await fetch(digestUrl, {
-      headers: { Accept: "application/json" },
+      headers,
       signal: AbortSignal.timeout(15000),
     });
+
     if (!resp.ok) {
       return new Response(
         JSON.stringify({
@@ -182,6 +205,7 @@ export default async function handler(req) {
         },
       );
     }
+
     digest = await resp.json();
   } catch (err) {
     return new Response(
@@ -235,7 +259,9 @@ export default async function handler(req) {
         if (!hasKeyword) continue;
       }
 
-      const dedupeBase = `${sourceNorm}|${normalizeText(link)}|${normalizeText(title)}`;
+      const dedupeBase = `${sourceNorm}|${normalizeText(link)}|${normalizeText(
+        title,
+      )}`;
       const id = hashKey(dedupeBase);
       if (seen.has(id)) continue;
       seen.add(id);
@@ -260,7 +286,9 @@ export default async function handler(req) {
   }
 
   items.sort((a, b) => b.publishedAt - a.publishedAt);
+
   const sliced = items.slice(0, limit);
+
   const nextCursor =
     sliced.length > 0
       ? new Date(Math.max(...sliced.map((i) => i.publishedAt))).toISOString()
